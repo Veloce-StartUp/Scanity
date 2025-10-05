@@ -1,89 +1,73 @@
-"use client"
-
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { QrCode, Calendar, Clock, TrendingUp } from "lucide-react"
-
-interface ScanHistoryItem {
-  result: string
-  timestamp: Date
-  type: string
-}
+import { ScannerStats, ScanHistoryItem } from "@/lib/types"
+import { Users, CheckCircle, XCircle, Package } from "lucide-react"
 
 interface DashboardStatsProps {
+  stats: ScannerStats | null
   history: ScanHistoryItem[]
 }
 
-export function DashboardStats({ history }: DashboardStatsProps) {
-  const today = new Date()
-  const todayScans = history.filter((scan) => scan.timestamp.toDateString() === today.toDateString()).length
-
-  const thisWeekScans = history.filter((scan) => {
-    const scanDate = scan.timestamp
-    const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000)
-    return scanDate >= weekAgo
-  }).length
-
-  const getTypeStats = () => {
-    const types: Record<string, number> = {}
-    history.forEach((scan) => {
-      const type = getResultType(scan.result)
-      types[type] = (types[type] || 0) + 1
-    })
-    return Object.entries(types).sort(([, a], [, b]) => b - a)[0] || ["None", 0]
+export function DashboardStats({ stats, history }: DashboardStatsProps) {
+  if (!stats) {
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          {[1, 2, 3, 4].map((i) => (
+              <Card key={i} className="animate-pulse">
+                <CardContent className="p-6">
+                  <div className="h-4 bg-muted rounded w-3/4 mb-2"></div>
+                  <div className="h-6 bg-muted rounded w-1/2"></div>
+                </CardContent>
+              </Card>
+          ))}
+        </div>
+    )
   }
 
-  const getResultType = (text: string): string => {
-    if (text.startsWith("http://") || text.startsWith("https://")) return "URL"
-    if (text.startsWith("WiFi:")) return "WiFi"
-    if (text.includes("@") && text.includes(".")) return "Email"
-    if (text.startsWith("tel:")) return "Phone"
-    if (text.startsWith("sms:")) return "SMS"
-    return "Text"
-  }
-
-  const [mostCommonType] = getTypeStats()
+  const statCards = [
+    {
+      title: "Total Scans",
+      value: stats.totalScans,
+      icon: Users,
+      description: "Scans today",
+      color: "text-blue-600"
+    },
+    {
+      title: "Successful",
+      value: stats.successfulScans,
+      icon: CheckCircle,
+      description: `${stats.successRate}% success rate`,
+      color: "text-green-600"
+    },
+    {
+      title: "Failed",
+      value: stats.failedScans,
+      icon: XCircle,
+      description: "Failed scans",
+      color: "text-red-600"
+    },
+    {
+      title: "Packages",
+      value: stats.fullPackageScans + stats.inaugurationScans + stats.day1Scans + stats.day2Scans,
+      icon: Package,
+      description: "Package scans",
+      color: "text-purple-600"
+    }
+  ]
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Total Scans</CardTitle>
-          <QrCode className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{history.length}</div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Today</CardTitle>
-          <Calendar className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{todayScans}</div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">This Week</CardTitle>
-          <Clock className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold">{thisWeekScans}</div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle className="text-sm font-medium">Most Common</CardTitle>
-          <TrendingUp className="h-4 w-4 text-muted-foreground" />
-        </CardHeader>
-        <CardContent>
-          <div className="text-2xl font-bold text-xs">{mostCommonType}</div>
-        </CardContent>
-      </Card>
-    </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        {statCards.map((stat, index) => (
+            <Card key={index} className="relative overflow-hidden">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">{stat.title}</CardTitle>
+                <stat.icon className={`h-4 w-4 ${stat.color}`} />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{stat.value}</div>
+                <p className="text-xs text-muted-foreground">{stat.description}</p>
+              </CardContent>
+            </Card>
+        ))}
+      </div>
   )
 }

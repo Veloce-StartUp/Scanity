@@ -78,18 +78,18 @@ export interface LoginResponse {
 }
 
 // QR Scanner Types
-export interface ScanHistoryItem {
-  result: string
-  timestamp: Date
-  type: string
-  userData?: UserData
-  itemsIssued?: {
-    lunchCoupon: boolean
-    bag: boolean
-  }
-  scanStatus: 'pending' | 'completed' | 'failed'
-  errorMessage?: string
-}
+// export interface ScanHistoryItem {
+//   result: string
+//   timestamp: Date
+//   type: string
+//   userData?: UserData
+//   itemsIssued?: {
+//     lunchCoupon: boolean
+//     bag: boolean
+//   }
+//   scanStatus: 'pending' | 'completed' | 'failed'
+//   errorMessage?: string
+// }
 
 export interface QRScanResult {
   userID: number
@@ -146,11 +146,52 @@ export interface ScanResultProps {
   onItemIssued?: (userData: UserData) => void
 }
 
-export interface ScanHistoryProps {
-  history: ScanHistoryItem[]
-  onClearHistory: () => void
+export interface ScannerStats {
+  scannerUserId: number;
+  statDate: string;
+  totalScans: number;
+  successfulScans: number;
+  failedScans: number;
+  inaugurationScans: number;
+  day1Scans: number;
+  day2Scans: number;
+  fullPackageScans: number;
+  successRate: number;
+  lastScanTime?: string;
 }
 
-export interface DashboardStatsProps {
-  history: ScanHistoryItem[]
+export interface ScanHistoryItem {
+  id: number;
+  userId: number;
+  userName: string;
+  userEmail: string;
+  packageId: number;
+  packageName: string;
+  packageCode: string;
+  eventDay: string;
+  checkedInAt: string;
+  lunchCouponIssued: boolean;
+  bagIssued: boolean;
+  status: string;
+  scannerName: string;
+}
+
+export interface DecodeQRUser {
+  userID: number;
+  email: string;
+}
+
+export interface ItemIssuanceRequest {
+  userId: number
+  itemType: ItemType
+  eventDay: string
+  scannerUserId: number
+  deviceId: string
+  issuedBy: number
+}
+
+export interface ItemIssuanceResponse {
+  success: boolean
+  message: string
+  data?: any
 }

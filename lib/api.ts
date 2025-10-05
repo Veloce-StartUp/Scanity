@@ -1,12 +1,12 @@
-import { 
-  UserData, 
-  LoginRequest, 
-  LoginResponse,
-  ApiResponse,
+import {
   ApiErrorResponse,
   ItemIssuanceResponse,
+  ItemType,
+  LoginRequest,
+  LoginResponse,
   ScanHistoryItem,
-  ItemType
+  ScannerStats,
+  UserData
 } from './types'
 import { config, getApiUrl } from './config'
 import { getEncryptedPassword } from './crypto'
@@ -94,22 +94,30 @@ export async function login(credentials: LoginRequest): Promise<UserData> {
 
 export async function logout(): Promise<void> {
   try {
-    const token = getStoredToken()
-    
+    const token = getStoredToken();
+
+    // Disconnect WebSocket first
+    if (typeof window !== 'undefined') {
+      const { webSocketService } = await import('./websocket');
+      webSocketService.disconnect();
+    }
+
     if (token) {
-      // Call logout endpoint if you have one
+      // Call logout endpoint to invalidate token on server
       // await fetch(getApiUrl(config.api.endpoints.logout), {
       //   method: 'POST',
       //   headers: {
       //     'Authorization': `Bearer ${token}`,
       //   },
-      // })
+      // }).catch(error => {
+      //   console.warn('Logout API call failed, but continuing with local cleanup:', error);
+      // });
     }
   } catch (error) {
-    console.error('Logout error:', error)
+    console.error('Logout error:', error);
   } finally {
     // Always clear stored data
-    clearStoredData()
+    clearStoredData();
   }
 }
 
@@ -239,34 +247,38 @@ export async function getScanHistory(): Promise<ScanHistoryItem[]> {
 }
 
 export async function markItemIssued(
-  userId: number,
-  itemType: ItemType,
-  deviceId: string = 'qr-scanner-web-001'
+    userId: number,
+    itemType: ItemType,
+    eventDay: string = new Date().toISOString().split('T')[0],
+    deviceId: string = 'qr-scanner-web-001',
 ): Promise<ItemIssuanceResponse> {
   try {
-    const endpoint = config.api.endpoints.markItem.replace('{userId}', userId.toString());
-    const url = `${endpoint}?itemType=${itemType}`;
+    const requestData = {
+      userId,
+      itemType,
+      eventDay,
+      issuedBy: deviceId,
+      scannerUserId: getStoredUserData()?.userID || 0
+    };
 
-    const response = await makeAuthenticatedRequest<ItemIssuanceResponse>(
-      getApiUrl(url),
-      {
-        method: 'PATCH',
-        headers: {
-          'X-Device-Id': deviceId,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ itemType }),
-      }
-    )
-    
-    return response
+    return await makeAuthenticatedRequest<ItemIssuanceResponse>(
+        getApiUrl(config.api.endpoints.markItem),
+        {
+          method: 'POST',
+          headers: {
+            'X-Device-Id': deviceId,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestData),
+        }
+    );
   } catch (error) {
-    console.error('Failed to mark item as issued:', error)
+    console.error('Failed to mark item as issued:', error);
     return {
       success: false,
       message: 'Failed to mark item as issued',
       error: error instanceof Error ? error.message : 'Unknown error'
-    }
+    };
   }
 }
 
@@ -283,5 +295,38 @@ export function decodeQRData(base64Data: string): { userID: number; email: strin
   } catch (error) {
     console.error("Failed to decode QR data:", error)
     return null
+  }
+}
+
+export async function getScannerStats(scannerUserId: number): Promise<ScannerStats> {
+  try {
+    return await makeAuthenticatedRequest<ScannerStats>(
+        getApiUrl(`${config.api.endpoints.scannerStats}/${scannerUserId}/today`)
+    );
+  } catch (error) {
+    console.error('Failed to get scanner stats:', error);
+    throw error;
+  }
+}
+
+export async function getScannerHistory(scannerUserId: number, page: number = 0, size: number = 50): Promise<ScanHistoryItem[]> {
+  try {
+    return await makeAuthenticatedRequest<ScanHistoryItem[]>(
+        getApiUrl(`${config.api.endpoints.scannerStats}/${scannerUserId}/history?page=${page}&size=${size}`)
+    );
+  } catch (error) {
+    console.error('Failed to get scanner history:', error);
+    return [];
+  }
+}
+
+export async function getScannerSummary(scannerUserId: number): Promise<ScannerStats> {
+  try {
+    return await makeAuthenticatedRequest<ScannerStats>(
+        getApiUrl(`${config.api.endpoints.scannerStats}/${scannerUserId}/summary`)
+    );
+  } catch (error) {
+    console.error('Failed to get scanner summary:', error);
+    throw error;
   }
 }

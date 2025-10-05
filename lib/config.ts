@@ -9,8 +9,9 @@ export const config = {
       authRefresh: '/auth/refresh',
       users: '/users',
       logout: '/logout',
-      markItem: '/checkin/{userId}/mark-item',
+      markItem: '/checkin/mark-item',
       scanHistory: '/scans/history',
+      scannerStats: '/statistics/scanner',
     },
   },
   

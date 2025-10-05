@@ -3,6 +3,7 @@
 import { Facebook, Twitter, Instagram, Linkedin, Github } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
+import {VELOCE_BLACK_LOG, VELOCE_WEBSITE } from "@/constants/constants";
 
 export function Footer() {
   const currentYear = new Date().getFullYear()
@@ -12,10 +13,10 @@ export function Footer() {
       <div className="container mx-auto px-4 py-6">
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
           {/* Company Logo Only */}
-          <Link href="https://veloce.lk" target="_blank">
+          <Link href={VELOCE_WEBSITE} target="_blank">
             <div>
               <img
-                src="https://res.cloudinary.com/djxtjt1uf/image/upload/v1754552918/Veloce_logo_yrybjn.png"
+                src={VELOCE_BLACK_LOG}
                 alt="VELOCE Logo"
                 className="h-8 w-32 object-contain brightness-0 invert"
               />
@@ -44,7 +45,7 @@ export function Footer() {
           {/* Copyright */}
           <div className="text-sm text-slate-400">
             <span>© {currentYear}
-              <Link href="https://veloce.lk" target="_blank" className="font-bold"> VELOCE. </Link>
+              <Link href={VELOCE_WEBSITE} target="_blank" className="font-bold"> VELOCE. </Link>
               All rights reserved.</span>
           </div>
         </div>
