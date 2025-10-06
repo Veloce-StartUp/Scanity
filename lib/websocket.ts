@@ -10,12 +10,6 @@ export interface ScanRequest {
   scanDate: string
 }
 
-export interface ScanResponse {
-  success: boolean
-  message: string
-  data?: any
-}
-
 export interface WebSocketCallbacks {
   onScanSuccess?: (message: string) => void
   onScanError?: (message: string) => void
@@ -25,16 +19,24 @@ export interface WebSocketCallbacks {
 
 class WebSocketService {
   private stompClient: Client | null = null
-  private socket: any = null
   private isConnected = false
   private sessionId: string | null = null
   private callbacks: WebSocketCallbacks = {}
   private scanResultsSubscription: StompSubscription | null = null
   private errorsSubscription: StompSubscription | null = null
-  private connectionPromise: Promise<void> | null = null // Track connection promise
+  private connectionPromise: Promise<void> | null = null
+  private connectionResolve: (() => void) | null = null
+  private connectionReject: ((error: Error) => void) | null = null
+  private reconnectAttempts = 0
+  private maxReconnectDelay = 30000 // 30s max backoff
 
   constructor() {
+    this.generateSessionId()
+  }
+
+  private generateSessionId() {
     this.sessionId = `scanner-${Date.now()}-${Math.random().toString(36).substring(2)}`
+    console.log('🔑 New session ID generated:', this.sessionId)
   }
 
   setCallbacks(callbacks: WebSocketCallbacks) {
@@ -42,97 +44,135 @@ class WebSocketService {
   }
 
   async connect(): Promise<void> {
-    // Return existing connection promise if connecting
+    // Return existing connection promise if already connecting
     if (this.connectionPromise) {
+      console.log('⏳ Already connecting, waiting on promise...')
       return this.connectionPromise
     }
 
-    this.connectionPromise = this._connect()
+    this.connectionPromise = new Promise((resolve, reject) => {
+      this.connectionResolve = resolve
+      this.connectionReject = reject
+
+      try {
+        const token = this.getStoredToken()
+        if (!token) {
+          throw new Error('No authorization token available')
+        }
+
+        this.disconnect()
+
+        console.log('🔌 Connecting to WebSocket...')
+
+        // Use HTTP URL for SockJS (NOT ws://)
+        const wsUrl = `${config.api.baseUrlWithoutVersion}/ws`
+
+        // Force ONLY xhr-polling to avoid any WebSocket/streaming attempts
+        const sockJs = new SockJS(wsUrl, null, {
+          transports: ['xhr-polling'] // Strict polling only - no WS or streaming
+        })
+
+        this.stompClient = new Client({
+          // Remove brokerURL when using webSocketFactory
+          webSocketFactory: () => sockJs,
+          debug: (str) => {
+            if (this.isStompError(str)) {
+              console.error('❌ STOMP Error:', str)
+            } else {
+              console.debug('🔧 STOMP Debug:', str)
+            }
+          },
+          reconnectDelay: 5000,
+          heartbeatIncoming: 10000, // Increased for stability
+          heartbeatOutgoing: 10000,
+          connectHeaders: {
+            'X-Auth-Token': token,
+            'Authorization': `Bearer ${token}`,
+            'X-Device-Type': 'qr-scanner-web',
+            'X-Session-Id': this.sessionId || '',
+          },
+          onConnect: (frame) => {
+            console.log('✅ WebSocket Connected! Session:', this.sessionId)
+            this.isConnected = true
+            this.reconnectAttempts = 0 // Reset on success
+            this.subscribeToChannels()
+            this.callbacks.onConnected?.(this.sessionId)
+            this.connectionResolve?.()
+            this.clearConnectionPromise()
+          },
+          onStompError: (frame) => {
+            console.error('❌ STOMP Connection Error:', frame)
+            this.isConnected = false
+            this.callbacks.onDisconnected?.()
+            const error = new Error(frame.headers?.message || 'STOMP connection failed')
+            this.connectionReject?.(error)
+            this.clearConnectionPromise()
+          },
+          onWebSocketError: (event) => {
+            console.error('❌ WebSocket Connection Error:', event)
+            this.isConnected = false
+            this.callbacks.onDisconnected?.()
+            const error = new Error('WebSocket connection failed')
+            this.connectionReject?.(error)
+            this.clearConnectionPromise()
+          },
+          onDisconnect: () => {
+            console.log('🔌 WebSocket Disconnected')
+            this.isConnected = false
+            this.callbacks.onDisconnected?.()
+            this.clearConnectionPromise()
+          }
+        })
+
+        this.stompClient.activate()
+
+      } catch (error) {
+        console.error('Failed to connect to WebSocket:', error)
+        this.connectionReject?.(error as Error)
+        this.clearConnectionPromise()
+      }
+    })
+
     return this.connectionPromise
   }
 
-  private async _connect(): Promise<void> {
-    try {
-      const token = this.getStoredToken()
-      if (!token) {
-        throw new Error('No authorization token available')
-      }
+  private clearConnectionPromise() {
+    this.connectionPromise = null
+    this.connectionResolve = null
+    this.connectionReject = null
+  }
 
-      // Validate token before connecting
-      if (!this.isTokenValid(token)) {
-        throw new Error('Token is invalid or expired')
-      }
+  private isStompError(str: string): boolean {
+    const errorIndicators = [
+      'ERROR',
+      'error:',
+      'failed',
+      'exception',
+      'rejected',
+      'unauthorized',
+      'access denied'
+    ]
 
-      this.disconnect()
+    const normalCommands = [
+      '>>> CONNECT',
+      '>>> SUBSCRIBE',
+      '>>> SEND',
+      '>>> UNSUBSCRIBE',
+      '>>> DISCONNECT',
+      '<<< CONNECTED',
+      '<<< MESSAGE',
+      '<<< ERROR',
+      '<<< RECEIPT'
+    ]
 
-      console.log('Connecting to WebSocket with token:', token.substring(0, 20) + '...')
+    const lowerStr = str.toLowerCase()
 
-      // Add token to URL for handshake authentication
-      const wsUrl = `${config.api.baseUrlWithoutVersion}/ws?token=${encodeURIComponent(token)}`
-
-      this.socket = new SockJS(wsUrl, null, {
-        transports: ['websocket', 'xhr-streaming', 'xhr-polling']
-      })
-
-      this.stompClient = new Client({
-        webSocketFactory: () => this.socket!,
-        debug: (str) => {
-          if (str.toLowerCase().includes('error')) {
-            console.error('STOMP Error:', str)
-          }
-        },
-        reconnectDelay: 5000,
-        heartbeatIncoming: 4000,
-        heartbeatOutgoing: 4000,
-        connectHeaders: {
-          'Authorization': `Bearer ${token}`,
-          'X-Device-Type': 'qr-scanner-web',
-          'X-Session-Id': this.sessionId || '',
-        },
-      })
-
-      this.stompClient.onConnect = (frame) => {
-        console.log('WebSocket Connected! Session ID:', this.sessionId)
-        this.isConnected = true
-        this.connectionPromise = null
-
-        this.subscribeToChannels()
-        this.callbacks.onConnected?.(this.sessionId)
-      }
-
-      this.stompClient.onDisconnect = () => {
-        console.log('WebSocket Disconnected')
-        this.isConnected = false
-        this.connectionPromise = null
-        this.callbacks.onDisconnected?.()
-      }
-
-      this.stompClient.onStompError = (frame) => {
-        console.error('STOMP Error:', frame)
-        this.isConnected = false
-        this.connectionPromise = null
-        this.callbacks.onDisconnected?.()
-
-        // If it's an authentication error, clear token
-        if (frame.headers?.message?.includes('Access Denied') ||
-            frame.headers?.message?.includes('Authentication')) {
-          this.clearStoredToken()
-        }
-      }
-
-      this.stompClient.onWebSocketError = (event) => {
-        console.error('WebSocket Error:', event)
-        this.isConnected = false
-        this.connectionPromise = null
-      }
-
-      await this.stompClient.activate()
-
-    } catch (error) {
-      console.error('Failed to connect to WebSocket:', error)
-      this.connectionPromise = null
-      throw error
+    const isNormalCommand = normalCommands.some(cmd => str.startsWith(cmd))
+    if (isNormalCommand) {
+      return str.startsWith('<<< ERROR')
     }
+
+    return errorIndicators.some(indicator => lowerStr.includes(indicator))
   }
 
   private subscribeToChannels() {
@@ -140,37 +180,38 @@ class WebSocketService {
 
     try {
       // Unsubscribe first if already subscribed
-      if (this.scanResultsSubscription) {
-        this.scanResultsSubscription.unsubscribe()
-      }
-      if (this.errorsSubscription) {
-        this.errorsSubscription.unsubscribe()
-      }
+      this.scanResultsSubscription?.unsubscribe()
+      this.errorsSubscription?.unsubscribe()
 
+      // Subscribe to scan results
       this.scanResultsSubscription = this.stompClient.subscribe(
           '/user/queue/scan-results',
           (message: Message) => {
-            console.log('Scan result received:', message.body)
+            console.log('📨 Scan result received:', message.body)
             this.callbacks.onScanSuccess?.(message.body)
           }
       )
 
+      // Subscribe to errors
       this.errorsSubscription = this.stompClient.subscribe(
           '/user/queue/errors',
           (message: Message) => {
-            console.log('Error received:', message.body)
+            console.log('❌ Backend error received:', message.body)
             this.callbacks.onScanError?.(message.body)
           }
       )
 
-      console.log('Subscribed to WebSocket channels')
+      console.log('✅ Subscribed to WebSocket channels:')
+      console.log('   - /user/queue/scan-results')
+      console.log('   - /user/queue/errors')
+
     } catch (error) {
       console.error('Failed to subscribe to channels:', error)
     }
   }
 
   async sendScanRequest(scanData: ScanRequest): Promise<void> {
-    if (!this.isConnected || !this.sessionId) {
+    if (!this.isConnected) {
       throw new Error('WebSocket not connected')
     }
 
@@ -178,7 +219,7 @@ class WebSocketService {
       const response = await fetch(`${config.api.baseUrl}/checkin/scan`, {
         method: 'POST',
         headers: {
-          'X-Socket-SessionId': this.sessionId,
+          'X-Socket-SessionId': this.sessionId || '',
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.getStoredToken()}`,
         },
@@ -186,14 +227,10 @@ class WebSocketService {
       })
 
       if (!response.ok) {
-        if (response.status === 401) {
-          this.clearStoredToken()
-          throw new Error('Authentication failed. Please login again.')
-        }
         throw new Error(`Scan request failed: ${response.status}`)
       }
 
-      console.log('Scan request sent successfully')
+      console.log('✅ Scan request sent successfully')
     } catch (error) {
       console.error('Failed to send scan request:', error)
       throw error
@@ -207,72 +244,52 @@ class WebSocketService {
     return null
   }
 
-  private clearStoredToken(): void {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('qr_scanner_access_token')
-    }
-  }
-
   disconnect(): void {
     try {
-      this.connectionPromise = null
+      this.scanResultsSubscription?.unsubscribe()
+      this.errorsSubscription?.unsubscribe()
 
-      if (this.scanResultsSubscription) {
-        this.scanResultsSubscription.unsubscribe()
-        this.scanResultsSubscription = null
-      }
-
-      if (this.errorsSubscription) {
-        this.errorsSubscription.unsubscribe()
-        this.errorsSubscription = null
-      }
+      this.scanResultsSubscription = null
+      this.errorsSubscription = null
 
       if (this.stompClient) {
         this.stompClient.deactivate()
         this.stompClient = null
       }
 
-      if (this.socket) {
-        this.socket.close()
-        this.socket = null
-      }
-
       this.isConnected = false
-      console.log('WebSocket disconnected')
+      this.clearConnectionPromise()
+      console.log('🔌 WebSocket disconnected')
     } catch (error) {
       console.error('Error disconnecting WebSocket:', error)
     }
   }
 
   isConnectedToWebSocket(): boolean {
-    return this.isConnected && this.stompClient?.connected === true
-  }
-
-  getSessionId(): string | null {
-    return this.sessionId
-  }
-
-  isTokenValid(token?: string): boolean {
-    const tokenToValidate = token || this.getStoredToken()
-    if (!tokenToValidate) return false
-
-    try {
-      const payload = JSON.parse(atob(tokenToValidate.split('.')[1]))
-      const currentTime = Math.floor(Date.now() / 1000)
-      // Check if token expires in more than 30 seconds
-      return payload.exp > (currentTime + 30)
-    } catch (error) {
-      console.error('Token validation error:', error)
-      return false
+    const connected = this.isConnected && this.stompClient?.connected === true
+    if (!connected) {
+      console.log('🔍 Connection check: isConnected=false or stompClient not active')
     }
+    return connected
   }
 
   async reconnect(): Promise<void> {
-    console.log('Forcing WebSocket reconnection...')
+    console.log('🔄 Forcing WebSocket reconnection... (attempt', this.reconnectAttempts + 1, ')')
+    this.generateSessionId() // Fresh session for clean reconnect
     this.disconnect()
-    // Small delay before reconnecting
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    await this.connect()
+
+    // Exponential backoff delay
+    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempts), this.maxReconnectDelay)
+    await new Promise(resolve => setTimeout(resolve, delay))
+    this.reconnectAttempts++
+
+    try {
+      await this.connect()
+      console.log('✅ Reconnect successful')
+    } catch (error) {
+      console.error('❌ Reconnect failed:', error)
+      // Optionally, throw or let health check retry
+    }
   }
 }
 

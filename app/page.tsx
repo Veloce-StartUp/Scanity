@@ -10,7 +10,7 @@ import { ScanHistory } from "@/components/dashboard/scan-history"
 import { DashboardStats } from "@/components/dashboard/dashboard-stats"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { User, Settings, Menu, Camera, CheckCircle, RefreshCw } from "lucide-react"
+import { User, Settings, Menu, Camera, CheckCircle, RefreshCw, LogOut } from "lucide-react"
 import { useToast } from "@/components/ui/toast-provider"
 import { webSocketService, ScanRequest } from "@/lib/websocket"
 import { Badge } from "@/components/ui/badge"
@@ -19,7 +19,12 @@ import { VELOCE_BLACK_LOG } from "@/constants/constants";
 import { RootState, AppDispatch } from '@/store'
 import { fetchScannerStats, incrementScanCount } from '@/store/slices/scannerSlice'
 import { fetchScannerHistory, addHistoryItem } from '@/store/slices/historySlice'
-import {DecodeQRUser} from "@/lib/types";
+import { DecodeQRUser } from "@/lib/types";
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
+
+// Cache for processed QR codes to prevent duplicate scans
+const processedQRCache = new Set<string>();
+const CACHE_CLEAR_INTERVAL = 30000; // Clear cache every 30 seconds
 
 function AppContent() {
   const dispatch = useDispatch<AppDispatch>()
@@ -30,15 +35,29 @@ function AppContent() {
   const { user, login, logout, isLoading } = useAuth()
   const { success, info, warning, error: showError } = useToast()
   const [scanResult, setScanResult] = useState<string | null>(null)
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [cameraActive, setCameraActive] = useState(false)
   const [timeLeft, setTimeLeft] = useState(60)
   const [isProcessing, setIsProcessing] = useState(false)
   const [webSocketConnected, setWebSocketConnected] = useState(false)
   const [scanCompleted, setScanCompleted] = useState(false)
+  const [lastScannedQR, setLastScannedQR] = useState<string | null>(null)
   const cameraTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const countdownRef = useRef<NodeJS.Timeout | null>(null)
   const setupCompleteRef = useRef(false)
+  const cacheClearRef = useRef<NodeJS.Timeout | null>(null)
+  const errorToastShownRef = useRef(false); // Prevent duplicate error toasts
+
+  // Clear QR cache periodically
+  useEffect(() => {
+    cacheClearRef.current = setInterval(() => {
+      processedQRCache.clear();
+      console.log('QR cache cleared');
+    }, CACHE_CLEAR_INTERVAL);
+
+    return () => {
+      if (cacheClearRef.current) clearInterval(cacheClearRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (user?.userID) {
@@ -47,101 +66,13 @@ function AppContent() {
     }
   }, [user, dispatch])
 
-  const getResultType = (text: string): string => {
-    try {
-      const decoded = atob(text)
-      const data = JSON.parse(decoded)
-      if (data.userID && data.email) return "User QR"
-    } catch (e) {
-      // Not base64 or not user data, continue with other checks
-    }
-
-    if (text.startsWith("http://") || text.startsWith("https://")) return "URL"
-    if (text.startsWith("WiFi:")) return "WiFi"
-    if (text.includes("@") && text.includes(".")) return "Email"
-    if (text.startsWith("tel:") || text.startsWith("sms:")) return "Contact"
-    return "Text"
-  }
-
-  const handleScan = async (result: string) => {
-    console.log("QR Scan detected:", result)
-
-    if (!result || result.trim() === '') {
-      showError("Invalid QR code: No hash value found.", "Scan Error")
-      return
-    }
-
-    if (!webSocketConnected) {
-      showError("WebSocket not connected. Please wait for connection.", "Connection Error")
-      return
-    }
-
-    if (!user) {
-      showError("Your session has expired. Please log in again to continue!", "Session Expired")
-      return
-    }
-
-    try {
-      setIsProcessing(true)
-
-      let isUserQR = false
-      let userData: DecodeQRUser | null = null
-
-      try {
-        const decoded = atob(result)
-        const data = JSON.parse(decoded)
-
-        console.log(data)
-        if (data?.userID && data?.email) {
-          isUserQR = true
-          userData = data
-        } else {
-          throw new Error("Missing required fields")
-        }
-      } catch (decodeError) {
-        console.error("QR decode error:", decodeError)
-        showError("Invalid or unreadable QR code. Please try again.", "Scan Error")
-        return
-      }
-
-      console.log("QR Scan detected:", isUserQR)
-      console.log(userData)
-      console.log(userData?.userID)
-
-      if (userData?.userID == null){
-        throw new Error("Missing user ID in SCAN qr.")
-      }
-
-      const today = new Date()
-      const localDate = today.toISOString().split('T')[0] // YYYY-MM-DD
-
-      const scanRequest: ScanRequest = {
-        userId: userData.userID || 0,
-        scannerUserId: user.userID || 0,
-        hash: result,
-        deviceId: 'qr-scanner-web-001',
-        scanDate: localDate,
-      }
-
-      await webSocketService.sendScanRequest(scanRequest)
-
-      setScanResult(result)
-
-      setScanCompleted(true)
-      setCameraActive(false)
-      success("QR code processed successfully!", "Scan Complete")
-    } catch (error) {
-      console.error("Scan processing error:", error)
-      showError("Failed to process scan request. Please try again.", "Scan Error")
-      dispatch(incrementScanCount({ successful: false }))
-    } finally {
-      setIsProcessing(false)
-    }
-  }
-
-  const handleScanSuccess = (scanData: any) => {
-    // This will be called when WebSocket receives success message
+  // Memoized callbacks that don't change
+  const handleScanSuccess = useCallback((scanData: any) => {
+    console.log("Processing scan success:", scanData)
     setIsProcessing(false)
+    setScanCompleted(true)
+    setCameraActive(false)
+    errorToastShownRef.current = false; // Reset error flag on success
 
     if (scanData.userId) {
       // Add to Redux history
@@ -167,11 +98,285 @@ function AppContent() {
         successful: true,
         packageCode: scanData.packageCode
       }))
+
+      success("QR code processed successfully!", "Scan Complete")
+    }
+  }, [user, dispatch, success])
+
+  const handleScanError = useCallback((errorMessage: string) => {
+    console.log("Scan error received:", errorMessage)
+    setIsProcessing(false)
+    dispatch(incrementScanCount({ successful: false }))
+
+    // Remove from cache on error
+    if (lastScannedQR) {
+      processedQRCache.delete(lastScannedQR);
+    }
+
+    // Prevent duplicate error toasts
+    if (!errorToastShownRef.current) {
+      errorToastShownRef.current = true;
+      try {
+        const errorData = JSON.parse(errorMessage)
+        showError(errorData.message || 'Scan failed', 'Scan Error')
+      } catch (e) {
+        showError(errorMessage, 'Scan Error')
+      }
+
+      // Reset error flag after a delay
+      setTimeout(() => {
+        errorToastShownRef.current = false;
+      }, 3000);
+    }
+  }, [lastScannedQR, dispatch, showError])
+
+  // WebSocket connection management
+  const setupWebSocketCallbacks = useCallback(() => {
+    webSocketService.setCallbacks({
+      onConnected: (sessionId) => {
+        console.log('WebSocket connected with session:', sessionId)
+        setWebSocketConnected(true)
+        setupCompleteRef.current = true
+        errorToastShownRef.current = false
+        success('WebSocket connected successfully', 'Connection Established')
+      },
+      onDisconnected: () => {
+        console.log('WebSocket disconnected')
+        setWebSocketConnected(false)
+        setupCompleteRef.current = false
+        if (!errorToastShownRef.current) {
+          errorToastShownRef.current = true
+          warning('WebSocket disconnected', 'Connection Lost')
+
+          // Reset error flag after a delay
+          setTimeout(() => {
+            errorToastShownRef.current = false;
+          }, 5000);
+        }
+      },
+      onScanSuccess: (message) => {
+        console.log('Scan success received:', message)
+        try {
+          const scanData = JSON.parse(message)
+          handleScanSuccess(scanData)
+        } catch (e) {
+          console.error('Failed to parse scan success message:', e)
+          if (!errorToastShownRef.current) {
+            errorToastShownRef.current = true
+            showError('Invalid scan response format', 'Scan Error')
+            setTimeout(() => {
+              errorToastShownRef.current = false;
+            }, 3000);
+          }
+        }
+      },
+      onScanError: (errorMessage) => {
+        handleScanError(errorMessage)
+      }
+    })
+  }, [handleScanSuccess, handleScanError, success, warning, showError])
+
+  // WebSocket setup - only runs when user changes
+  useEffect(() => {
+    if (!user) {
+      return
+    }
+
+    const initializeWebSocket = async () => {
+      try {
+        setupWebSocketCallbacks()
+
+        // Only connect if not already connected
+        if (!webSocketService.isConnectedToWebSocket()) {
+          await webSocketService.connect()
+        } else {
+          // If already connected, just update the state
+          setWebSocketConnected(true)
+          setupCompleteRef.current = true
+        }
+      } catch (error) {
+        console.error('Failed to setup WebSocket:', error)
+        setupCompleteRef.current = false
+        if (error instanceof Error && error.message.includes('Access Denied')) {
+          showError('Authentication failed. Please login again.', 'Access Denied')
+          logout()
+        } else {
+          showError('Failed to connect to WebSocket', 'Connection Error')
+        }
+      }
+    }
+
+    initializeWebSocket()
+
+    // Cleanup function
+    return () => {
+      // Don't disconnect WebSocket here to maintain connection during app usage
+    }
+  }, [user, setupWebSocketCallbacks, logout, showError])
+
+  // WebSocket health check and auto-reconnect
+  useEffect(() => {
+    if (!user || !setupCompleteRef.current) return
+
+    const healthCheckInterval = setInterval(async () => {
+      if (!webSocketService.isConnectedToWebSocket() && setupCompleteRef.current) {
+        console.log('WebSocket disconnected, attempting to reconnect...')
+        try {
+          await webSocketService.reconnect()
+        } catch (error) {
+          console.error('WebSocket reconnection failed:', error)
+        }
+      }
+    }, 10000) // Check every 10 seconds
+
+    return () => clearInterval(healthCheckInterval)
+  }, [user])
+
+  const getResultType = (text: string): string => {
+    try {
+      const decoded = atob(text)
+      const data = JSON.parse(decoded)
+      if (data.userID && data.email) return "User QR"
+    } catch (e) {
+      // Not base64 or not user data, continue with other checks
+    }
+
+    if (text.startsWith("http://") || text.startsWith("https://")) return "URL"
+    if (text.startsWith("WiFi:")) return "WiFi"
+    if (text.includes("@") && text.includes(".")) return "Email"
+    if (text.startsWith("tel:") || text.startsWith("sms:")) return "Contact"
+    return "Text"
+  }
+
+  const handleScan = async (result: string) => {
+    console.log("QR Scan detected:", result)
+
+    // Basic validation
+    if (!result || result.trim() === '') {
+      if (!errorToastShownRef.current) {
+        errorToastShownRef.current = true
+        showError("Invalid QR code: No hash value found.", "Scan Error")
+        setTimeout(() => {
+          errorToastShownRef.current = false
+        }, 3000)
+      }
+      return
+    }
+
+    // Check if this QR was recently processed
+    if (processedQRCache.has(result)) {
+      console.log("QR code already processed recently, skipping...")
+      if (!errorToastShownRef.current) {
+        errorToastShownRef.current = true
+        info("This QR code was already scanned recently", "Duplicate Scan")
+        setTimeout(() => {
+          errorToastShownRef.current = false
+        }, 3000)
+      }
+      return
+    }
+
+    if (!webSocketConnected) {
+      if (!errorToastShownRef.current) {
+        errorToastShownRef.current = true
+        showError("WebSocket not connected. Please wait for connection.", "Connection Error")
+        setTimeout(() => {
+          errorToastShownRef.current = false
+        }, 3000)
+      }
+      return
+    }
+
+    if (!user) {
+      if (!errorToastShownRef.current) {
+        errorToastShownRef.current = true
+        showError("Your session has expired. Please log in again to continue!", "Session Expired")
+        setTimeout(() => {
+          errorToastShownRef.current = false
+        }, 3000)
+      }
+      return
+    }
+
+    // Prevent multiple simultaneous processing
+    if (isProcessing) {
+      console.log("Already processing a scan, skipping...")
+      return
+    }
+
+    try {
+      setIsProcessing(true)
+      setLastScannedQR(result)
+      errorToastShownRef.current = false
+
+      let userData: DecodeQRUser | null = null
+
+      try {
+        const decoded = atob(result)
+        const data = JSON.parse(decoded)
+
+        if (data?.userID && data?.email) {
+          userData = data
+        } else {
+          throw new Error("Invalid QR code format")
+        }
+      } catch (decodeError) {
+        console.error("QR decode error:", decodeError)
+        if (!errorToastShownRef.current) {
+          errorToastShownRef.current = true
+          showError("Invalid or unreadable QR code. Please try again.", "Scan Error")
+          setTimeout(() => {
+            errorToastShownRef.current = false
+          }, 3000)
+        }
+        setIsProcessing(false)
+        return
+      }
+
+      if (!userData?.userID) {
+        throw new Error("Missing user ID in QR code.")
+      }
+
+      const today = new Date()
+      const localDate = today.toISOString().split('T')[0]
+
+      const scanRequest: ScanRequest = {
+        userId: userData.userID,
+        scannerUserId: user.userID || 0,
+        hash: result,
+        deviceId: 'qr-scanner-web-001',
+        scanDate: localDate,
+      }
+
+      console.log("Sending scan request:", scanRequest)
+
+      // Add to cache immediately to prevent duplicate scans
+      processedQRCache.add(result);
+
+      await webSocketService.sendScanRequest(scanRequest)
+
+      setScanResult(result)
+      setCameraActive(false)
+    } catch (error) {
+      console.error("Scan processing error:", error)
+      if (!errorToastShownRef.current) {
+        errorToastShownRef.current = true
+        showError("Failed to process scan request. Please try again.", "Scan Error")
+        setTimeout(() => {
+          errorToastShownRef.current = false
+        }, 3000)
+      }
+      dispatch(incrementScanCount({ successful: false }))
+      setIsProcessing(false)
+
+      // Remove from cache if failed
+      if (lastScannedQR) {
+        processedQRCache.delete(lastScannedQR);
+      }
     }
   }
 
   const resetCameraTimeout = () => {
-    // Clear existing timeout and countdown
     if (cameraTimeoutRef.current) {
       clearTimeout(cameraTimeoutRef.current)
     }
@@ -179,10 +384,8 @@ function AppContent() {
       clearInterval(countdownRef.current)
     }
 
-    // Reset countdown to 60 seconds
     setTimeLeft(60)
 
-    // Start countdown timer
     countdownRef.current = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -193,194 +396,65 @@ function AppContent() {
       })
     }, 1000)
 
-    // Set new timeout for 1 minute
     cameraTimeoutRef.current = setTimeout(() => {
       setCameraActive(false)
       setTimeLeft(0)
       if (countdownRef.current) clearInterval(countdownRef.current)
-      // Only show timeout message if camera was active
       if (cameraActive) {
         info("Camera deactivated due to inactivity", "Camera Timeout")
       }
-    }, 60000) // 1 minute
+    }, 60000)
   }
 
   const enableCamera = () => {
     setCameraActive(true)
     setScanCompleted(false)
     setScanResult(null)
+    setLastScannedQR(null)
+    errorToastShownRef.current = false
     resetCameraTimeout()
-    success("Camera activated! Ready to scan.", "Camera Enabled")
   }
 
   const startNewScan = () => {
     setScanCompleted(false)
     setScanResult(null)
+    setLastScannedQR(null)
     setCameraActive(true)
+    errorToastShownRef.current = false
     resetCameraTimeout()
   }
 
   const completeProcess = () => {
     setScanCompleted(false)
     setScanResult(null)
+    setLastScannedQR(null)
     setCameraActive(false)
+    errorToastShownRef.current = false
   }
 
-  // Start camera timeout when component mounts
   useEffect(() => {
     resetCameraTimeout()
-
-    // Cleanup timeout and countdown on unmount
     return () => {
-      if (cameraTimeoutRef.current) {
-        clearTimeout(cameraTimeoutRef.current)
-      }
-      if (countdownRef.current) {
-        clearInterval(countdownRef.current)
-      }
+      if (cameraTimeoutRef.current) clearTimeout(cameraTimeoutRef.current)
+      if (countdownRef.current) clearInterval(countdownRef.current)
     }
   }, [])
-
-  // WebSocket connection and setup
-  useEffect(() => {
-    // Prevent multiple setups
-    if (setupCompleteRef.current || !user) {
-      return
-    }
-
-    const setupWebSocket = async () => {
-      try {
-        // Set callbacks first
-        webSocketService.setCallbacks({
-          onConnected: (sessionId) => {
-            console.log('WebSocket connected with session:', sessionId)
-            setWebSocketConnected(true)
-            if (!webSocketConnected) {
-              success('WebSocket connected successfully', 'Connection Established')
-            }
-          },
-          onDisconnected: () => {
-            console.log('WebSocket disconnected')
-            setWebSocketConnected(false)
-            warning('WebSocket disconnected', 'Connection Lost')
-          },
-          onScanSuccess: (message) => {
-            console.log('Scan success received:', message)
-            try {
-              const scanData = JSON.parse(message)
-              handleScanSuccess(scanData)
-            } catch (e) {
-              console.error('Failed to parse scan success message:', e)
-            }
-          },
-          onScanError: (message) => {
-            console.log('Scan error received:', message)
-            setIsProcessing(false)
-            dispatch(incrementScanCount({ successful: false }))
-            showError(message, 'Scan Error')
-          },
-          onItemIssuanceSuccess: (message) => {
-            console.log('Item issuance success:', message)
-            try {
-              const issuanceData = JSON.parse(message)
-              handleItemIssuanceSuccess(issuanceData)
-            } catch (e) {
-              console.error('Failed to parse item issuance message:', e)
-            }
-          },
-          onItemIssuanceError: (message) => {
-            console.log('Item issuance error:', message)
-            showError(message, 'Issuance Error')
-          }
-        })
-
-        // Connect only if not already connected
-        if (!webSocketService.isConnectedToWebSocket()) {
-          await webSocketService.connect()
-        }
-
-        setupCompleteRef.current = true
-
-      } catch (error) {
-        console.error('Failed to setup WebSocket:', error)
-        if (error instanceof Error && error.message.includes('Access Denied')) {
-          showError('Authentication failed. Please login again.', 'Access Denied')
-          logout()
-        } else {
-          showError('Failed to connect to WebSocket', 'Connection Error')
-        }
-      }
-    }
-
-    setupWebSocket()
-
-    // Cleanup function
-    return () => {
-      setupCompleteRef.current = false
-    }
-  }, [user])
-
-  // Periodic token validation and WebSocket health check
-  // useEffect(() => {
-  //   if (!user || !webSocketConnected) return
-  //
-  //   const healthCheckInterval = setInterval(async () => {
-  //     try {
-  //       // Check if token is still valid
-  //       if (!webSocketService.isTokenValid()) {
-  //         console.log('Token expired, attempting to reconnect...')
-  //         await webSocketService.reconnect()
-  //       }
-  //     } catch (error) {
-  //       console.error('Health check failed:', error)
-  //     }
-  //   }, 30000) // Check every 30 seconds
-  //
-  //   return () => clearInterval(healthCheckInterval)
-  // }, [user, webSocketConnected])
-
-  const handleItemIssuanceSuccess = useCallback((issuanceData: any) => {
-    if (!issuanceData.userId) return
-
-    // Update Redux history with the new item issuance status
-    const updatedScan = {
-      id: Date.now(),
-      userId: issuanceData.userId,
-      userName: issuanceData.userName || 'Unknown User',
-      userEmail: issuanceData.userEmail || '',
-      packageId: issuanceData.packageId,
-      packageName: issuanceData.packageName,
-      packageCode: issuanceData.packageCode,
-      eventDay: new Date().toISOString().split('T')[0],
-      checkedInAt: new Date().toISOString(),
-      lunchCouponIssued: issuanceData.lunchCouponIssued || false,
-      bagIssued: issuanceData.bagIssued || false,
-      status: 'Completed',
-      scannerName: user?.displayName || 'Unknown'
-    }
-
-    dispatch(addHistoryItem(updatedScan))
-
-    // Refresh stats but don't wait for it
-    if (user?.userID) {
-      dispatch(fetchScannerStats(user.userID))
-    }
-
-    const itemType = issuanceData.itemType === 'LUNCH_COUPON' ? 'Lunch Coupon' : 'Conference Bag'
-    success(`${itemType} issued successfully!`, 'Item Updated')
-  }, [user, dispatch, success])
 
   const handleNewScan = () => {
     setScanResult(null)
     setScanCompleted(false)
+    setLastScannedQR(null)
     setCameraActive(true)
+    errorToastShownRef.current = false
     resetCameraTimeout()
   }
 
   const handleScanResultClose = () => {
     setScanResult(null)
     setScanCompleted(false)
+    setLastScannedQR(null)
     setCameraActive(false)
+    errorToastShownRef.current = false
   }
 
   const handleItemIssued = () => {
@@ -391,7 +465,6 @@ function AppContent() {
   }
 
   const handleClearHistory = () => {
-    // This would need to be implemented in the history slice
     info("Clear history functionality would be implemented here", "History")
   }
 
@@ -424,129 +497,166 @@ function AppContent() {
 
   return (
       <div className="min-h-screen bg-background flex flex-col">
-        <header className="border-b bg-card sticky top-0 z-40">
-          <div className="container mx-auto px-4 py-3 sm:py-4">
+        <header className="border-b bg-card sticky top-0 z-40 shadow-sm">
+          <div className="container mx-auto px-3 sm:px-4 py-2 sm:py-3">
             <div className="flex justify-between items-center">
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="bg-white p-1 rounded-md shadow-sm">
-                    <img
-                        src={VELOCE_BLACK_LOG}
-                        alt="VELOCE Logo"
-                        className="h-8 w-8 sm:h-10 sm:w-10 object-contain"
-                    />
-                  </div>
-                  <h1 className="text-lg sm:text-xl font-bold text-primary">SCANITY</h1>
+              {/* Logo and Brand */}
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className="bg-white p-1 rounded-md shadow-sm">
+                  <img
+                      src={VELOCE_BLACK_LOG}
+                      alt="VELOCE Logo"
+                      className="h-6 w-6 sm:h-8 sm:w-8 object-contain"
+                  />
                 </div>
-
-                {stats && (
-                    <div className="hidden md:flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>Scans Today: {stats.totalScans}</span>
-                      <span>•</span>
-                      <span>Success: {stats.successRate}%</span>
-                      {stats.lastScanTime && (
-                          <>
-                            <span>•</span>
-                            <span>Last: {new Date(stats.lastScanTime).toLocaleTimeString()}</span>
-                          </>
-                      )}
-                    </div>
-                )}
+                <div>
+                  <h1 className="text-base sm:text-lg font-bold text-primary leading-tight">SCANITY</h1>
+                  {stats && (
+                      <div className="hidden xs:flex items-center gap-1 text-xs text-muted-foreground">
+                        <span>Scans: {stats.totalScans}</span>
+                        <span>•</span>
+                        <span>{stats.successRate}% success</span>
+                      </div>
+                  )}
+                </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                {/* Stats Refresh Button */}
+              {/* Desktop Navigation */}
+              <div className="hidden md:flex items-center gap-2">
+                {/* WebSocket Status */}
+                <div className="flex items-center gap-2 mr-2">
+                  <div className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full ${
+                      wsStatus.connected ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                  }`}>
+                    <div className={`w-2 h-2 rounded-full ${
+                        wsStatus.connected ? 'bg-green-500' : 'bg-yellow-500'
+                    }`}></div>
+                    {wsStatus.text}
+                  </div>
+                </div>
+
+                <ScanHistory history={historyItems} onClearHistory={handleClearHistory} />
+
                 <Button
-                    variant="outline"
+                    variant="ghost"
                     size="sm"
                     onClick={() => user?.userID && dispatch(fetchScannerStats(user.userID))}
                     disabled={statsLoading}
-                    className="gap-2 hidden sm:flex"
+                    className="gap-1"
                 >
-                  <RefreshCw className={`h-4 w-4 ${statsLoading ? 'animate-spin' : ''}`} />
-                  Refresh Stats
+                  <RefreshCw className={`h-3 w-3 ${statsLoading ? 'animate-spin' : ''}`} />
+                  <span className="hidden lg:inline">Refresh</span>
                 </Button>
 
-                {/* Desktop Navigation */}
-                <div className="hidden md:flex items-center gap-2">
-                  <ScanHistory history={historyItems} onClearHistory={handleClearHistory} />
-                  <Button variant="ghost" size="sm" className="gap-2 text-primary hover:text-primary hover:bg-primary/10">
-                    <Settings className="h-4 w-4" />
-                    Settings
-                  </Button>
-                  <Button variant="ghost" size="sm" className="gap-2 text-primary hover:text-primary hover:bg-primary/10">
-                    <User className="h-4 w-4" />
-                    <span className="hidden lg:inline">{user.displayName}</span>
-                  </Button>
-                  <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={logout}
-                      className="border-primary text-primary hover:bg-primary hover:text-white bg-transparent"
-                  >
-                    Sign Out
-                  </Button>
+                <Button variant="ghost" size="sm" className="gap-1">
+                  <Settings className="h-4 w-4" />
+                  <span className="hidden lg:inline">Settings</span>
+                </Button>
+
+                <div className="flex items-center gap-2 px-2 py-1 text-sm text-muted-foreground">
+                  <User className="h-4 w-4" />
+                  <span className="max-w-[120px] truncate">{user.displayName}</span>
                 </div>
 
-                {/* Mobile Menu Button */}
-                <div className="md:hidden">
-                  <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                      className="text-primary"
-                  >
-                    <Menu className="h-4 w-4" />
-                  </Button>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={logout}
+                    className="gap-1 border-primary text-primary hover:bg-primary hover:text-white"
+                >
+                  <LogOut className="h-3 w-3" />
+                  <span className="hidden lg:inline">Sign Out</span>
+                </Button>
+              </div>
+
+              {/* Mobile Navigation */}
+              <div className="flex md:hidden items-center gap-2">
+                {/* WebSocket Status Badge */}
+                <div className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full ${
+                    wsStatus.connected ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                }`}>
+                  <div className={`w-2 h-2 rounded-full ${
+                      wsStatus.connected ? 'bg-green-500' : 'bg-yellow-500'
+                  }`}></div>
                 </div>
+
+                <Sheet>
+                  <SheetTrigger asChild>
+                    <Button variant="ghost" size="sm" className="p-2">
+                      <Menu className="h-4 w-4" />
+                    </Button>
+                  </SheetTrigger>
+                  <SheetContent side="right" className="w-[280px] sm:w-[350px]">
+                    <div className="flex flex-col h-full">
+                      {/* User Info */}
+                      <div className="flex items-center gap-3 p-4 border-b">
+                        <User className="h-8 w-8 text-primary" />
+                        <div>
+                          <p className="font-medium text-sm">{user.displayName}</p>
+                          <p className="text-xs text-muted-foreground">{user.email}</p>
+                        </div>
+                      </div>
+
+                      {/* Navigation Items */}
+                      <div className="flex-1 py-4 space-y-2">
+                        <ScanHistory history={historyItems} onClearHistory={handleClearHistory} />
+
+                        <Button
+                            variant="ghost"
+                            className="w-full justify-start gap-2"
+                            onClick={() => user?.userID && dispatch(fetchScannerStats(user.userID))}
+                            disabled={statsLoading}
+                        >
+                          <RefreshCw className={`h-4 w-4 ${statsLoading ? 'animate-spin' : ''}`} />
+                          Refresh Stats
+                        </Button>
+
+                        <Button variant="ghost" className="w-full justify-start gap-2">
+                          <Settings className="h-4 w-4" />
+                          Settings
+                        </Button>
+                      </div>
+
+                      {/* Footer */}
+                      <div className="p-4 border-t">
+                        <Button
+                            variant="outline"
+                            className="w-full gap-2"
+                            onClick={logout}
+                        >
+                          <LogOut className="h-4 w-4" />
+                          Sign Out
+                        </Button>
+                      </div>
+                    </div>
+                  </SheetContent>
+                </Sheet>
               </div>
             </div>
 
-            {/* Mobile Stats */}
+            {/* Mobile Stats Bar */}
             {stats && (
-                <div className="md:hidden mt-3 pt-3 border-t">
-                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                    <span>Scans: {stats.totalScans}</span>
+                <div className="md:hidden mt-2 pt-2 border-t">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>Total: {stats.totalScans}</span>
                     <span>Success: {stats.successRate}%</span>
                     {stats.lastScanTime && (
-                        <span>Last: {new Date(stats.lastScanTime).toLocaleTimeString()}</span>
+                        <span>Last: {new Date(stats.lastScanTime).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
                     )}
                   </div>
-                </div>
-            )}
-
-            {/* Mobile Navigation */}
-            {mobileMenuOpen && (
-                <div className="md:hidden mt-4 pt-4 border-t space-y-2">
-                  <div className="flex items-center gap-2 px-2 py-1">
-                    <User className="h-4 w-4 text-primary" />
-                    <span className="text-sm text-primary">{user.displayName}</span>
-                  </div>
-                  <ScanHistory history={historyItems} onClearHistory={handleClearHistory} />
-                  <Button variant="ghost" size="sm" className="w-full justify-start gap-2 text-primary hover:bg-primary/10">
-                    <Settings className="h-4 w-4" />
-                    Settings
-                  </Button>
-                  <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={logout}
-                      className="w-full bg-transparent border-primary text-primary hover:bg-primary hover:text-white"
-                  >
-                    Sign Out
-                  </Button>
                 </div>
             )}
           </div>
         </header>
 
-        <main className="flex-1 container mx-auto px-4 py-4 sm:py-8">
+        <main className="flex-1 container mx-auto px-3 sm:px-4 py-4 sm:py-6">
           <div className="max-w-6xl mx-auto">
             <DashboardStats stats={stats} history={historyItems} />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 lg:gap-8">
+              {/* Scanner Card */}
               <div className="order-1">
-                <Card className="overflow-hidden shadow-lg">
+                <Card className="overflow-hidden shadow-lg border-0">
                   <CardHeader className="pb-4 bg-gradient-to-r from-primary/5 to-secondary/5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="flex items-center gap-3">
@@ -554,9 +664,14 @@ function AppContent() {
                           <Camera className="h-5 w-5 text-primary" />
                         </div>
                         <div>
-                          <CardTitle className="text-lg sm:text-xl text-primary">QR Code Scanner</CardTitle>
+                          <CardTitle className="text-lg sm:text-xl text-primary">QR Scanner</CardTitle>
                           <p className="text-xs text-muted-foreground mt-1">
-                            {cameraActive ? 'Camera Active' : 'Camera Inactive'}
+                            {cameraActive
+                                ? `Camera Active - ${timeLeft}s remaining`
+                                : scanCompleted
+                                    ? 'Scan Completed'
+                                    : 'Ready to Scan'
+                            }
                           </p>
                         </div>
                       </div>
@@ -609,6 +724,7 @@ function AppContent() {
                       </div>
                     </div>
                   </CardHeader>
+
                   <CardContent className="p-0">
                     {cameraActive ? (
                         <div className="relative">
@@ -622,42 +738,56 @@ function AppContent() {
                           )}
                           <QRScanner
                               onScan={handleScan}
-                              onError={(error) => console.error("Scanner error:", error)}
+                              onError={(error) => {
+                                console.error("Scanner error:", error)
+                                if (!errorToastShownRef.current) {
+                                  errorToastShownRef.current = true
+                                  showError("Camera error: " + error, "Scanner Error")
+                                  setTimeout(() => {
+                                    errorToastShownRef.current = false
+                                  }, 3000)
+                                }
+                                setCameraActive(false)
+                              }}
                               autoStart={true}
                           />
                         </div>
                     ) : scanCompleted ? (
-                        <div className="text-center py-12 px-4">
-                          <div className="p-4 bg-green-100 rounded-full w-fit mx-auto mb-4">
-                            <CheckCircle className="h-12 w-12 text-green-600" />
+                        <div className="text-center py-8 sm:py-12 px-4">
+                          <div className="p-3 sm:p-4 bg-green-100 rounded-full w-fit mx-auto mb-4">
+                            <CheckCircle className="h-8 w-8 sm:h-12 sm:w-12 text-green-600" />
                           </div>
-                          <h3 className="text-lg font-semibold text-green-800 mb-2">Scan Completed!</h3>
-                          <p className="text-sm text-muted-foreground mb-6">
-                            QR code has been processed successfully. Complete the process to scan another code.
+                          <h3 className="text-base sm:text-lg font-semibold text-green-800 mb-2">Scan Completed!</h3>
+                          <p className="text-xs sm:text-sm text-muted-foreground mb-4 sm:mb-6">
+                            QR code processed successfully.
                           </p>
                           <div className="flex flex-col sm:flex-row gap-2 justify-center">
-                            <Button onClick={completeProcess} variant="outline" className="gap-2">
-                              <CheckCircle className="h-4 w-4" />
-                              Complete Process
+                            <Button onClick={completeProcess} variant="outline" className="gap-2 text-xs sm:text-sm">
+                              <CheckCircle className="h-3 w-3 sm:h-4 sm:w-4" />
+                              Complete
                             </Button>
-                            <Button onClick={startNewScan} className="gap-2">
-                              <Camera className="h-4 w-4" />
+                            <Button onClick={startNewScan} className="gap-2 text-xs sm:text-sm">
+                              <Camera className="h-3 w-3 sm:h-4 sm:w-4" />
                               Scan Another
                             </Button>
                           </div>
                         </div>
                     ) : (
-                        <div className="text-center py-12 px-4">
-                          <div className="p-4 bg-muted rounded-full w-fit mx-auto mb-4">
-                            <Camera className="h-12 w-12 text-muted-foreground" />
+                        <div className="text-center py-8 sm:py-12 px-4">
+                          <div className="p-3 sm:p-4 bg-muted rounded-full w-fit mx-auto mb-4">
+                            <Camera className="h-8 w-8 sm:h-12 sm:w-12 text-muted-foreground" />
                           </div>
-                          <h3 className="text-lg font-semibold text-muted-foreground mb-2">Ready to Scan</h3>
-                          <p className="text-sm text-muted-foreground mb-6">
-                            Click the button below to activate the camera and start scanning QR codes.
+                          <h3 className="text-base sm:text-lg font-semibold text-muted-foreground mb-2">Ready to Scan</h3>
+                          <p className="text-xs sm:text-sm text-muted-foreground mb-4 sm:mb-6">
+                            Activate camera to start scanning QR codes.
                           </p>
-                          <Button onClick={enableCamera} className="gap-2 text-lg px-8 py-3">
-                            <Camera className="h-5 w-5" />
-                            Scan QR Code
+                          <Button
+                              onClick={enableCamera}
+                              className="gap-2 text-sm sm:text-lg px-6 sm:px-8 py-2 sm:py-3"
+                              size="lg"
+                          >
+                            <Camera className="h-4 w-4 sm:h-5 sm:w-5" />
+                            Activate Camera
                           </Button>
                         </div>
                     )}
@@ -665,39 +795,40 @@ function AppContent() {
                 </Card>
               </div>
 
+              {/* Recent Scans Card */}
               <div className="order-2">
-                <Card>
+                <Card className="border-0 shadow-lg">
                   <CardHeader className="pb-4">
                     <CardTitle className="text-lg sm:text-xl text-primary">Recent Scans</CardTitle>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="p-4 sm:p-6">
                     {historyItems.length === 0 ? (
                         <div className="text-center py-6 sm:py-8 text-muted-foreground">
-                          <div className="p-4 bg-white rounded-full w-fit mx-auto mb-4 shadow-sm">
+                          <div className="p-3 sm:p-4 bg-white rounded-full w-fit mx-auto mb-4 shadow-sm">
                             <img
                                 src={VELOCE_BLACK_LOG}
                                 alt="VELOCE Logo"
-                                className="h-12 w-12 sm:h-16 sm:w-16 object-contain opacity-60"
+                                className="h-10 w-10 sm:h-16 sm:w-16 object-contain opacity-60"
                             />
                           </div>
-                          <p className="text-sm sm:text-base">No scans yet. Start scanning QR codes!</p>
+                          <p className="text-xs sm:text-sm">No scans yet. Start scanning QR codes!</p>
                         </div>
                     ) : (
                         <div className="space-y-3">
                           {historyItems.slice(0, 5).map((scan, index) => (
                               <div key={scan.id || index} className="p-3 bg-muted rounded-lg border">
                                 <div className="flex items-center justify-between mb-2">
-                                  <div className="flex items-center gap-2">
-                              <span className="text-xs bg-primary/10 text-primary px-2 py-1 rounded font-medium">
-                                {scan.packageName}
-                              </span>
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs bg-primary/10 text-primary px-2 py-1 rounded font-medium truncate max-w-[120px]">
+                                      {scan.packageName}
+                                    </span>
                                     <Badge className={`text-xs ${getStatusColor(scan.status)}`}>
                                       {scan.status}
                                     </Badge>
                                   </div>
-                                  <span className="text-xs text-muted-foreground">
-                              {new Date(scan.checkedInAt).toLocaleTimeString()}
-                            </span>
+                                  <span className="text-xs text-muted-foreground whitespace-nowrap">
+                                    {new Date(scan.checkedInAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                  </span>
                                 </div>
                                 <p className="text-xs sm:text-sm font-medium text-card-foreground truncate">
                                   {scan.userName}
@@ -705,7 +836,7 @@ function AppContent() {
                                 <p className="text-xs text-muted-foreground truncate">
                                   {scan.userEmail}
                                 </p>
-                                <div className="flex gap-2 mt-2">
+                                <div className="flex gap-2 mt-2 flex-wrap">
                                   <Badge variant={scan.lunchCouponIssued ? "default" : "secondary"} className="text-xs">
                                     {scan.lunchCouponIssued ? "Lunch ✓" : "Lunch Pending"}
                                   </Badge>

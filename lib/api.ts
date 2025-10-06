@@ -5,7 +5,7 @@ import {
   LoginRequest,
   LoginResponse,
   ScanHistoryItem,
-  ScannerStats,
+  ScannerStats, UserAttendanceData,
   UserData
 } from './types'
 import { config, getApiUrl } from './config'
@@ -222,6 +222,15 @@ export async function getUserData(userID: number): Promise<UserData | null> {
   }
 }
 
+export async function getUserAttendanceData(userID: number): Promise<UserAttendanceData | null> {
+  try {
+    return await makeAuthenticatedRequest<UserAttendanceData>(getApiUrl(`${config.api.endpoints.users}/${userID}/attendance-status`))
+  } catch (error) {
+    console.error('Failed to get user data:', error)
+    return null
+  }
+}
+
 export async function updateUserStatus(
   userID: number,
   updates: Partial<Pick<UserData, "lastLoginDate" | "lastLogoutDate" | "lunchCouponIssued" | "bagIssued" | "lastScanTime">>,
@@ -250,7 +259,7 @@ export async function markItemIssued(
     userId: number,
     itemType: ItemType,
     eventDay: string = new Date().toISOString().split('T')[0],
-    deviceId: string = 'qr-scanner-web-001',
+    deviceId: string = 'qr-scanner-web-001'
 ): Promise<ItemIssuanceResponse> {
   try {
     const requestData = {
@@ -261,22 +270,33 @@ export async function markItemIssued(
       scannerUserId: getStoredUserData()?.userID || 0
     };
 
-    return await makeAuthenticatedRequest<ItemIssuanceResponse>(
-        getApiUrl(config.api.endpoints.markItem),
-        {
-          method: 'POST',
-          headers: {
-            'X-Device-Id': deviceId,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestData),
-        }
-    );
+    // CHANGE: Use synchronous endpoint instead of WebSocket
+    const response = await fetch(`${config.api.baseUrl}/checkin/mark-item`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${getStoredToken()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestData),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || `Request failed: ${response.status}`);
+    }
+
+    const result = await response.json();
+    return {
+      success: true,
+      message: 'Item marked successfully',
+      data: result.data
+    };
+
   } catch (error) {
     console.error('Failed to mark item as issued:', error);
     return {
       success: false,
-      message: 'Failed to mark item as issued',
+      message: error instanceof Error ? error.message : 'Failed to mark item as issued',
       error: error instanceof Error ? error.message : 'Unknown error'
     };
   }

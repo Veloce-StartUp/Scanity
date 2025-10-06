@@ -102,12 +102,6 @@ export enum ItemType {
   BAG = 'BAG'
 }
 
-export interface ItemIssuanceRequest {
-  userId: number
-  itemType: ItemType
-  deviceId: string
-}
-
 export interface ItemIssuanceResponse {
   success: boolean
   message: string
@@ -161,19 +155,19 @@ export interface ScannerStats {
 }
 
 export interface ScanHistoryItem {
-  id: number;
-  userId: number;
-  userName: string;
-  userEmail: string;
-  packageId: number;
-  packageName: string;
-  packageCode: string;
-  eventDay: string;
-  checkedInAt: string;
-  lunchCouponIssued: boolean;
-  bagIssued: boolean;
-  status: string;
-  scannerName: string;
+  id: number
+  userId: number
+  userName: string
+  userEmail: string
+  packageId: number
+  packageName: string
+  packageCode: string
+  eventDay: string
+  checkedInAt: string
+  lunchCouponIssued: boolean
+  bagIssued: boolean
+  status: string
+  scannerName: string
 }
 
 export interface DecodeQRUser {
@@ -186,12 +180,27 @@ export interface ItemIssuanceRequest {
   itemType: ItemType
   eventDay: string
   scannerUserId: number
-  deviceId: string
-  issuedBy: number
+  issuedBy: string
 }
 
 export interface ItemIssuanceResponse {
   success: boolean
   message: string
   data?: any
+}
+
+export interface UserAttendanceData {
+  userID: number
+  nic: string
+  firstName: string
+  lastName: string
+  email: string
+  status: string
+  companyName?: string
+  roles: string[]
+  packageIDs: number[]
+  hasBagIssued: boolean
+  hasLunchIssuedToday: boolean
+  lastScanTime?: string
+  displayName?: string
 }

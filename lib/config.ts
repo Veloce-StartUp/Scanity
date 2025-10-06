@@ -8,6 +8,7 @@ export const config = {
       auth: '/auth',
       authRefresh: '/auth/refresh',
       users: '/users',
+      usersAttendance: '/users',
       logout: '/logout',
       markItem: '/checkin/mark-item',
       scanHistory: '/scans/history',

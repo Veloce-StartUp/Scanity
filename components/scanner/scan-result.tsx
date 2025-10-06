@@ -5,15 +5,22 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Copy, X, CheckCircle, User, Coffee, ShoppingBag, Loader2, AlertCircle, Check, XCircle } from "lucide-react"
-import { decodeQRData, getUserData, markItemIssued } from "@/lib/api"
-import { UserData, ScanResultProps, ItemIssuanceResponse, ItemType } from "@/lib/types"
+import { Copy, X, CheckCircle, User, Coffee, ShoppingBag, Loader2, AlertCircle, Check, XCircle, Building } from "lucide-react"
+import { decodeQRData, getUserAttendanceData, getUserData, markItemIssued } from "@/lib/api"
+import { ScanResultProps, ItemType, UserAttendanceData } from "@/lib/types"
 import { useToast } from "@/components/ui/toast-provider"
-import { webSocketService } from "@/lib/websocket";
+
+// Package mapping configuration
+const PACKAGE_CONFIG = {
+  1: { name: "Full Conference", badgeVariant: "default" as const },
+  2: { name: "Inauguration Ceremony", badgeVariant: "secondary" as const },
+  3: { name: "Conference Day 01", badgeVariant: "secondary" as const },
+  4: { name: "Conference Day 02", badgeVariant: "secondary" as const }
+} as const
 
 export function ScanResult({ result, onClose, onNewScan, onItemIssued }: ScanResultProps) {
   const [copied, setCopied] = useState(false)
-  const [userData, setUserData] = useState<UserData | null>(null)
+  const [userData, setUserData] = useState<UserAttendanceData | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [updating, setUpdating] = useState(false)
@@ -30,83 +37,123 @@ export function ScanResult({ result, onClose, onNewScan, onItemIssued }: ScanRes
   const processQRData = async () => {
     setLoading(true)
     setError(null)
+    setUserData(null)
 
     try {
       const qrData = decodeQRData(result)
 
       if (qrData) {
-        const user = await getUserData(qrData.userID)
-        if (user) {
+        const user = await getUserAttendanceData(qrData.userID)
+
+        if (user && Object.keys(user).length > 0) {
           setUserData(user)
         } else {
-          setError(`User not found for ID: ${qrData.userID}`)
+          setError("User not found or invalid user data")
         }
       } else {
         setError("Invalid QR code format")
       }
     } catch (err) {
       setError("Failed to process QR code data")
+      console.error("Error processing QR data:", err)
     } finally {
       setLoading(false)
     }
   }
 
-  const handleMarkItemIssued = async (itemType: ItemType) => {
-    if (!userData || !webSocketService.isConnectedToWebSocket()) return
+  // Get package names with Full Conference logic
+  const getPackageNames = (packageIDs: number[] = []) => {
+    const packageNames: string[] = []
 
-    setUpdating(true)
-    const statusKey = itemType === ItemType.LUNCH_COUPON ? 'lunchCoupon' : 'bag'
-    setIssuanceStatus(prev => ({ ...prev, [statusKey]: 'pending' }))
+    // Check if user has all packages (2,3,4) which equals Full Conference
+    const hasFullConference = [2, 3, 4].every(id => packageIDs.includes(id))
+
+    if (hasFullConference) {
+      packageNames.push(PACKAGE_CONFIG[1].name)
+    } else {
+      // Add individual packages
+      packageIDs.forEach(id => {
+        if (PACKAGE_CONFIG[id as keyof typeof PACKAGE_CONFIG]) {
+          packageNames.push(PACKAGE_CONFIG[id as keyof typeof PACKAGE_CONFIG].name)
+        }
+      })
+    }
+
+    return packageNames
+  }
+
+  const handleMarkItemIssued = async (itemType: ItemType) => {
+    if (!userData) return;
+
+    const statusKey = itemType === ItemType.LUNCH_COUPON ? "lunchCoupon" : "bag";
+    const itemLabel = itemType === ItemType.LUNCH_COUPON ? "Lunch Coupon" : "Conference Kit";
+
+    setUpdating(true);
+    setIssuanceStatus((prev) => ({ ...prev, [statusKey]: "pending" }));
 
     try {
-      const response: ItemIssuanceResponse = await markItemIssued(
+      const response = await markItemIssued(
           userData.userID,
           itemType,
-          new Date().toISOString().split('T')[0]
-      )
+          new Date().toISOString().split("T")[0]
+      );
 
-      if (response.success) {
-        setIssuanceStatus(prev => ({ ...prev, [statusKey]: 'success' }))
+      console.log('Mark item response:', response);
 
-        // Update local user data to reflect the change
+      // Check both success flag AND data field to determine if the operation was truly successful
+      const isTrulySuccessful = response.success && response.data === true;
+
+      if (isTrulySuccessful) {
+        // Success case - item was marked successfully in database
+        setIssuanceStatus((prev) => ({ ...prev, [statusKey]: "success" }));
+        success(`${itemLabel} marked as issued successfully!`, "Item Updated");
+
         const updatedUser = {
           ...userData,
-          [itemType === ItemType.LUNCH_COUPON ? 'lunchCouponIssued' : 'bagIssued']: true
-        }
-        setUserData(updatedUser)
+          [itemType === ItemType.LUNCH_COUPON ? "hasLunchIssuedToday" : "hasBagIssued"]: true,
+        };
+        setUserData(updatedUser);
 
-        success(`${itemType === ItemType.LUNCH_COUPON ? 'Lunch Coupon' : 'Conference Bag'} marked as issued successfully!`, 'Item Updated')
-
-        // Call the callback to update scan history
         if (onItemIssued) {
-          onItemIssued()
+          // @ts-ignore
+          onItemIssued();
         }
-
-        // Reset success status after 2 seconds
-        setTimeout(() => {
-          setIssuanceStatus(prev => ({ ...prev, [statusKey]: null }))
-        }, 2000)
       } else {
-        setIssuanceStatus(prev => ({ ...prev, [statusKey]: 'error' }))
-        showError(response.error || `Failed to mark ${itemType.toLowerCase()} as issued`, 'Issuance Error')
+        if (response.success && response.data === false) {
+          setIssuanceStatus((prev) => ({ ...prev, [statusKey]: "error" }));
+          showError(`${itemLabel} was not issued. Please try again or contact support.`, "Issuance Failed");
+        }
+        else if (!response.success) {
+          if (response.message === "Item already marked") {
+            const updatedUser = {
+              ...userData,
+              [itemType === ItemType.LUNCH_COUPON ? "hasLunchIssuedToday" : "hasBagIssued"]: true,
+            };
+            setUserData(updatedUser);
 
-        // Reset error status after 3 seconds
-        setTimeout(() => {
-          setIssuanceStatus(prev => ({ ...prev, [statusKey]: null }))
-        }, 3000)
+            setIssuanceStatus((prev) => ({ ...prev, [statusKey]: "success" }));
+            success(`${itemLabel} was already issued`, "Already Issued");
+          } else {
+            setIssuanceStatus((prev) => ({ ...prev, [statusKey]: "error" }));
+            showError(`${itemLabel} failed: ${response.message}`, "Issuance Error");
+          }
+        } else {
+          throw new Error("Unexpected response format from server");
+        }
       }
-    } catch (err) {
-      setIssuanceStatus(prev => ({ ...prev, [statusKey]: 'error' }))
-      showError(`Failed to mark ${itemType.toLowerCase()} as issued`, 'Issuance Error')
+    } catch (err: any) {
+      const backendMessage =
+          err?.response?.data?.message || err.message || "An unexpected error occurred";
 
-      // Reset error status after 3 seconds
-      setTimeout(() => {
-        setIssuanceStatus(prev => ({ ...prev, [statusKey]: null }))
-      }, 3000)
+      setIssuanceStatus((prev) => ({ ...prev, [statusKey]: "error" }));
+      showError(`${itemLabel} issuance failed: ${backendMessage}`, "Issuance Error");
     } finally {
-      setUpdating(false)
+      setUpdating(false);
+      setTimeout(() => {
+        setIssuanceStatus((prev) => ({ ...prev, [statusKey]: null }));
+      }, 2500);
     }
-  }
+  };
 
   const getStatusIcon = (itemType: ItemType) => {
     const statusKey = itemType === ItemType.LUNCH_COUPON ? 'lunchCoupon' : 'bag'
@@ -127,7 +174,8 @@ export function ScanResult({ result, onClose, onNewScan, onItemIssued }: ScanRes
     }
   }
 
-  const isAlreadyProcessed = userData && userData.lunchCouponIssued && userData.bagIssued
+  const isAlreadyProcessed = userData && userData.hasBagIssued && userData.hasLunchIssuedToday
+  const packageNames = userData ? getPackageNames(userData.packageIDs) : []
 
   return (
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -169,36 +217,69 @@ export function ScanResult({ result, onClose, onNewScan, onItemIssued }: ScanRes
                   )}
 
                   <div className="space-y-3">
-                    <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
-                      <User className="h-4 w-4 text-primary" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">{userData.displayName || `${userData.firstName} ${userData.lastName}`}</p>
-                        <p className="text-xs text-muted-foreground truncate">{userData.email}</p>
-                        <p className="text-xs text-muted-foreground">ID: {userData.userID}</p>
+                    {/* User Info Card */}
+                    <div className="p-3 bg-muted rounded-lg space-y-2">
+                      <div className="flex items-center gap-2">
+                        <User className="h-4 w-4 text-primary" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">
+                            {userData.displayName || `${userData.firstName} ${userData.lastName}`}
+                          </p>
+                          <p className="text-xs text-muted-foreground truncate">{userData.email}</p>
+                          <p className="text-xs text-muted-foreground">ID: {userData.userID}</p>
+                        </div>
                       </div>
+
+                      {/* Company Name */}
+                      {userData.companyName && (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <Building className="h-3 w-3" />
+                            <span>{userData.companyName}</span>
+                          </div>
+                      )}
+
+                      {/* Package Badges */}
+                      {packageNames.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-1">
+                            {packageNames.map((packageName, index) => (
+                                <Badge
+                                    key={index}
+                                    variant="secondary"
+                                    className="text-xs"
+                                >
+                                  {packageName}
+                                </Badge>
+                            ))}
+                          </div>
+                      )}
                     </div>
 
+                    {/* Items Issuance Section */}
                     <div className="grid grid-cols-1 gap-3">
+                      {/* Lunch Coupon */}
                       <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
                         <div className="flex items-center gap-2">
                           <Coffee className="h-4 w-4 text-orange-500" />
                           <span className="text-sm font-medium">Lunch Coupon</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <Badge variant={userData.lunchCouponIssued ? "default" : "secondary"} className="text-xs">
-                            {userData.lunchCouponIssued ? "Issued" : "Pending"}
+                          <Badge
+                              variant={userData.hasLunchIssuedToday ? "default" : "secondary"}
+                              className="text-xs"
+                          >
+                            {userData.hasLunchIssuedToday ? "Issued" : "Pending"}
                           </Badge>
                           {getStatusIcon(ItemType.LUNCH_COUPON)}
                           <Button
                               size="sm"
-                              variant={userData.lunchCouponIssued ? "outline" : "default"}
+                              variant={userData.hasLunchIssuedToday ? "outline" : "default"}
                               onClick={() => handleMarkItemIssued(ItemType.LUNCH_COUPON)}
-                              disabled={updating || userData.lunchCouponIssued}
-                              className="text-xs px-2 py-1 h-7"
+                              disabled={updating || userData.hasLunchIssuedToday}
+                              className="text-xs px-2 py-1 h-7 min-w-[85px]"
                           >
-                            {updating ? (
+                            {updating && issuanceStatus.lunchCoupon === 'pending' ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : userData.lunchCouponIssued ? (
+                            ) : userData.hasLunchIssuedToday ? (
                                 "Issued"
                             ) : (
                                 "Mark Issued"
@@ -207,26 +288,30 @@ export function ScanResult({ result, onClose, onNewScan, onItemIssued }: ScanRes
                         </div>
                       </div>
 
+                      {/* Conference Bag */}
                       <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
                         <div className="flex items-center gap-2">
                           <ShoppingBag className="h-4 w-4 text-blue-500" />
                           <span className="text-sm font-medium">Conference Bag</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <Badge variant={userData.bagIssued ? "default" : "secondary"} className="text-xs">
-                            {userData.bagIssued ? "Issued" : "Pending"}
+                          <Badge
+                              variant={userData.hasBagIssued ? "default" : "secondary"}
+                              className="text-xs"
+                          >
+                            {userData.hasBagIssued ? "Issued" : "Pending"}
                           </Badge>
                           {getStatusIcon(ItemType.BAG)}
                           <Button
                               size="sm"
-                              variant={userData.bagIssued ? "outline" : "default"}
+                              variant={userData.hasBagIssued ? "outline" : "default"}
                               onClick={() => handleMarkItemIssued(ItemType.BAG)}
-                              disabled={updating || userData.bagIssued}
-                              className="text-xs px-2 py-1 h-7"
+                              disabled={updating || userData.hasBagIssued}
+                              className="text-xs px-2 py-1 h-7 min-w-[85px]"
                           >
-                            {updating ? (
+                            {updating && issuanceStatus.bag === 'pending' ? (
                                 <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : userData.bagIssued ? (
+                            ) : userData.hasBagIssued ? (
                                 "Issued"
                             ) : (
                                 "Mark Issued"
@@ -245,6 +330,7 @@ export function ScanResult({ result, onClose, onNewScan, onItemIssued }: ScanRes
                 </>
             )}
 
+            {/* Raw Data Display for Invalid/Unknown QR Codes */}
             {!loading && !userData && !error && (
                 <>
                   <div className="flex items-center gap-2">
