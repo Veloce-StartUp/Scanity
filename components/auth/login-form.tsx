@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 
 import { Eye, EyeOff } from "lucide-react"
-import { VELOCE_BLACK_LOG } from "@/constants/constants";
+import { VELOCE_WHITE_LOGO_WITHOUT_NAME } from "@/constants/constants";
 interface LoginFormComponentProps {
   onLogin: (email: string, password: string) => Promise<void>
   isLoading?: boolean
@@ -32,7 +32,7 @@ export function LoginForm({ onLogin, isLoading = false }: LoginFormComponentProp
           <div className="flex justify-center mb-4">
             <div className="p-3 bg-primary rounded-full">
               <img
-                src={VELOCE_BLACK_LOG}
+                src={VELOCE_WHITE_LOGO_WITHOUT_NAME}
                 alt="Veloce Logo"
                 className="h-8 w-8 object-contain"
               />
