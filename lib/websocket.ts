@@ -69,7 +69,13 @@ class WebSocketService {
 
         // Force ONLY xhr-polling to avoid any WebSocket/streaming attempts
         const sockJs = new SockJS(wsUrl, null, {
-          transports: ['xhr-polling'] // Strict polling only - no WS or streaming
+          transports: ['xhr-polling'], // Strict polling only - no WS or streaming
+          headers: { // Add CORS headers here
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Auth-Token, X-Device-Type, X-Session-Id',
+            'Access-Control-Allow-Credentials': 'true'
+          }
         })
 
         this.stompClient = new Client({
@@ -90,6 +96,8 @@ class WebSocketService {
             'Authorization': `Bearer ${token}`,
             'X-Device-Type': 'qr-scanner-web',
             'X-Session-Id': this.sessionId || '',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Auth-Token, X-Device-Type, X-Session-Id'
           },
           onConnect: (frame) => {
             console.log('✅ WebSocket Connected! Session:', this.sessionId)
